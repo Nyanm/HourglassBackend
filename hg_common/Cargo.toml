@@ -9,6 +9,9 @@ path = "src/common_lib.rs"
 
 [dependencies]
 serde      = { workspace = true }
-serde_yaml = { workspace = true }
+tracing    = { workspace = true }
 rusqlite   = { workspace = true }
 anyhow     = { workspace = true }
+
+strum_macros = "0.28"
+serde_yaml = "0.9.34+deprecated"
