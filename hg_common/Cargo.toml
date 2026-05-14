@@ -1,0 +1,14 @@
+[package]
+name = "hg_common"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+name = "hg_common"
+path = "src/common_lib.rs"
+
+[dependencies]
+serde      = { workspace = true }
+serde_yaml = { workspace = true }
+rusqlite   = { workspace = true }
+anyhow     = { workspace = true }

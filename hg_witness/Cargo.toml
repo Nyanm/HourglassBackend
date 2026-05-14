@@ -1,0 +1,13 @@
+[package]
+name = "hg_witness"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+name = "hg_witness"
+path = "src/witness_lib.rs"
+
+[dependencies]
+hg_common = { workspace = true }
+anyhow    = { workspace = true }
+tracing   = { workspace = true }

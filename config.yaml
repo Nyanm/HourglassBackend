@@ -1,0 +1,6 @@
+# database info
+db_path: "./grain.sqlite"
+
+# user tracker info
+pool_interval_ms: 1000
+idle_timeout_ms: 180000

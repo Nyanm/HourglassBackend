@@ -1,0 +1,12 @@
+[package]
+name = "web_receiver"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "web_receiver"
+path = "src/web_receiver_main.rs"
+
+[dependencies]
+anyhow     = { workspace = true }
+tracing    = { workspace = true }

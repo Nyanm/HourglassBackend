@@ -1,0 +1,21 @@
+[package]
+name = "hg_surveillant"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+name = "hg_surveillant"
+path = "src/surveillant_lib.rs"
+
+[dependencies]
+hg_common = { workspace = true }
+anyhow    = { workspace = true }
+tracing   = { workspace = true }
+
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_System_SystemInformation",
+    "Win32_System_Threading",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging"
+] }

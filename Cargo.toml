@@ -1,0 +1,40 @@
+[workspace]
+members = ["hg_common", "hg_surveillant", "hg_witness", "web_receiver"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+
+[workspace.dependencies]
+anyhow = "1.0"
+strum_macros = "0.28"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+rusqlite = { version = "0.39", features = ["bundled"] }
+ctrlc = "3.5"
+serde = {version = "1.0", features = ["derive"]}
+serde_yaml = "0.9"
+tracing = "0.1"
+
+hg_common   = { path = "hg_common" }
+hg_surveillant  = { path = "hg_surveillant" }
+hg_witness  = { path = "hg_witness" }
+
+[package]
+name = "hourglass_backend"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "hourglass_backend"
+path = "src/hourglass_main.rs"
+
+[dependencies]
+hg_common         = { workspace = true }
+hg_surveillant    = { workspace = true }
+hg_witness        = { workspace = true }
+anyhow            = { workspace = true }
+tracing           = { workspace = true }
+
+tracing-subscriber = "0.3"
+tracing-appender = "0.2"
