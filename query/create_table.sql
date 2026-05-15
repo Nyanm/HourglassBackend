@@ -1,3 +1,5 @@
+-- enable WAL mode
+PRAGMA journal_mode=WAL;
 -- create table
 CREATE TABLE IF NOT EXISTS raw_events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,

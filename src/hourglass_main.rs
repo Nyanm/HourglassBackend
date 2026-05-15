@@ -1,7 +1,7 @@
 use std::sync::{atomic, Arc};
 use tracing::{info, Level};
 
-use hg_common::{DbHandler, HgConfig};
+use hg_common::{DbHandlerReader, DbHandlerWriter, HgConfig};
 
 pub(crate) const CONFIG_PATH: &str = "config.yaml";
 
@@ -32,8 +32,8 @@ fn main() -> anyhow::Result<()> {
     ctrlc::set_handler(move || {_abool_running.store(false, atomic::Ordering::SeqCst)})?;
 
     // load internal components
-    let arc_db_handler = Arc::new(DbHandler::new(Arc::clone(&arc_config)).expect("Failed to initialize database"));
-    
+    let arc_db_writer = Arc::new(DbHandlerWriter::new(Arc::clone(&arc_config)).expect("Failed to initialize database writer"));
+    let arc_db_reader = Arc::new(DbHandlerReader::new(Arc::clone(&arc_config)).expect("Failed to initialize database reader"));
 
     Ok(())
 }

@@ -33,6 +33,15 @@ impl PartialEq for AppSnapshotInfo {
 }
 impl Eq for AppSnapshotInfo {}
 
+#[derive(Debug, Clone)]
+pub struct SegmentInfo {
+    pub row_id: i64,
+    pub event_type: EventType,
+    pub start_ms: i64,
+    pub end_ms: i64,
+    pub app_snapshot_info: AppSnapshotInfo,
+}
+
 #[derive(Debug, Deserialize, Clone)]
 pub struct HgConfig {
     pub db_path: String,
