@@ -1,11 +1,13 @@
-use std::sync::{atomic, Arc};
+use std::sync::Arc;
 use tracing::{info, Level};
 
 use hg_common::{DbHandlerReader, DbHandlerWriter, HgConfig};
+use hg_surveillant::UserTracker;
 
 pub(crate) const CONFIG_PATH: &str = "config.yaml";
 
-fn main() -> anyhow::Result<()> {
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
     // load tracing logger
     let file_appender = tracing_appender::rolling::RollingFileAppender::builder()
         .rotation(tracing_appender::rolling::Rotation::DAILY)
@@ -26,14 +28,16 @@ fn main() -> anyhow::Result<()> {
     let arc_config: Arc<HgConfig> = Arc::new(HgConfig::new(CONFIG_PATH)?);
     info!("deserialized config: {:?}", arc_config);
 
-    // capture system signal
-    let abool_running = Arc::new(atomic::AtomicBool::new(true));
-    let _abool_running = Arc::clone(&abool_running);
-    ctrlc::set_handler(move || {_abool_running.store(false, atomic::Ordering::SeqCst)})?;
-
     // load internal components
     let arc_db_writer = Arc::new(DbHandlerWriter::new(Arc::clone(&arc_config)).expect("Failed to initialize database writer"));
     let arc_db_reader = Arc::new(DbHandlerReader::new(Arc::clone(&arc_config)).expect("Failed to initialize database reader"));
+    let mut tracker = UserTracker::new(Arc::clone(&arc_config), Arc::clone(&arc_db_writer));
+
+    // activative
+    tokio::select!{
+        _ = tracker.run() => { }
+        _ = tokio::signal::ctrl_c() => { }
+    }
 
     Ok(())
 }
