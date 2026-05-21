@@ -30,7 +30,7 @@ impl Drop for UserTracker {
         // close last segment and start a new offline segment
         let now_ms = Utc::now().timestamp_millis();
         self.state = EventType::Offline;
-        self.register_database(now_ms, true).expect("fail to register drop segment");
+        self.register_database(now_ms).expect("fail to register drop segment");
 
         debug!("see you next time");
     }
@@ -73,7 +73,7 @@ impl UserTracker {
         let timestamp = if legacy_state == EventType::Active && self.state == EventType::Idle { last_input_ms } else { now_ms };
         // state or foreground app changed or first time for registration
         if flag_state_change || flag_foreground_switch || legacy_state == EventType::Online {
-            self.register_database(timestamp, flag_state_change)?;
+            self.register_database(timestamp)?;
             return Ok(())
         }
 
@@ -81,12 +81,11 @@ impl UserTracker {
         Ok(())
     }
 
-    fn register_database(&self, timestamp: i64, flag_switch: bool) -> anyhow::Result<()> {
+    fn register_database(&self, timestamp: i64) -> anyhow::Result<()> {
         self.arc_db_handler.update_segment(timestamp)?;
-        self.arc_db_handler.register_raw_event(self.state, timestamp, flag_switch, &self.opt_app_info)?;
         self.arc_db_handler.register_segment(self.state, timestamp, &self.opt_app_info)?;
 
-        debug!("register segment with state [{}], foreground switch [{}]", self.state, flag_switch);
+        debug!("register segment with state [{}]", self.state);
         Ok(())
     }
 
