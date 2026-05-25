@@ -1,0 +1,14 @@
+{
+  "manifest_version": 3,
+  "name": "Hourglass Web Sensor",
+  "version": "0.1.0",
+  "description": "Forward active tab info to the Hourglass backend.",
+  "permissions": [
+    "tabs",
+    "nativeMessaging"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "minimum_chrome_version": "102"
+}
