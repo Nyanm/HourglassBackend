@@ -8,5 +8,12 @@ name = "web_receiver"
 path = "src/web_receiver_main.rs"
 
 [dependencies]
+hg_common  = { workspace = true }
+
 anyhow     = { workspace = true }
+chrono     = { workspace = true }
 tracing    = { workspace = true }
+
+serde_json = "1"
+tracing-subscriber = "0.3"
+tracing-appender   = "0.2"

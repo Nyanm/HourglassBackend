@@ -11,7 +11,7 @@ async fn main() -> anyhow::Result<()> {
     // load tracing logger
     let file_appender = tracing_appender::rolling::RollingFileAppender::builder()
         .rotation(tracing_appender::rolling::Rotation::DAILY)
-        .filename_prefix("sot")
+        .filename_prefix("hourglass")
         .filename_suffix("log")
         .build("./log")?;
     let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);

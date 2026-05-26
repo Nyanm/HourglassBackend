@@ -47,6 +47,7 @@ pub struct HgConfig {
     pub db_path: String,
     pub pool_interval_ms: i64,
     pub idle_timeout_ms: i64,
+    pub web_receiver_udp_addr: String,
 }
 impl HgConfig {
     pub fn new(str_path: &str) -> anyhow::Result<Self> {

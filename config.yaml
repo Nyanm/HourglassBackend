@@ -4,3 +4,6 @@ db_path: "./grain.sqlite"
 # user tracker info
 pool_interval_ms: 1000
 idle_timeout_ms: 180000
+
+# external module info
+web_receiver_udp_addr: "127.0.0.1:51789"  # web sensor receiver -> backend ipc
