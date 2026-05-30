@@ -33,6 +33,11 @@ use std::sync::Mutex;
 use anyhow::{bail, Context};
 use tracing::warn;
 
+use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+    CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
+};
+
 use hg_common::HgConfig;
 
 // guard against runaway walks (symlink cycles) when searching upward for config.yaml
@@ -41,6 +46,8 @@ const NUM_MAX_PARENT_WALK: usize = 8;
 const NUM_MAX_FRAME_BYTES: usize = 1024 * 1024;
 // any free local port is fine since we only send; loopback bind keeps traffic local
 const STR_LOCAL_BIND_ADDR: &str = "127.0.0.1:0";
+// hourglass-side wire format: [4-byte LE u32: browser pid][native messaging json body]
+const NUM_PID_PREFIX_BYTES: usize = 4;
 
 fn read_frame<R: Read>(reader: &mut R) -> anyhow::Result<Option<Vec<u8>>> {
     // UnexpectedEof at the very start of a frame is the legitimate "browser closed the port" signal
@@ -60,17 +67,55 @@ fn read_frame<R: Read>(reader: &mut R) -> anyhow::Result<Option<Vec<u8>>> {
     Ok(Some(vec_body))
 }
 
+// resolves the parent (browser) pid via toolhelp snapshot; called once at startup and cached
+fn lookup_parent_pid() -> Option<u32> {
+    unsafe {
+        let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        if snapshot == INVALID_HANDLE_VALUE { return None; }
+
+        let mut entry: PROCESSENTRY32W = std::mem::zeroed();
+        entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
+
+        let num_my_pid = std::process::id();
+        let mut opt_parent_pid: Option<u32> = None;
+
+        if Process32FirstW(snapshot, &mut entry) != 0 {  // traverse all process
+            loop {
+                if entry.th32ProcessID == num_my_pid {
+                    opt_parent_pid = Some(entry.th32ParentProcessID);
+                    break;
+                }
+                if Process32NextW(snapshot, &mut entry) == 0 { break; }
+            }
+        }
+
+        CloseHandle(snapshot);
+        opt_parent_pid
+    }
+}
+
 pub fn run(str_udp_target: &str) -> anyhow::Result<()> {
     let socket = UdpSocket::bind(STR_LOCAL_BIND_ADDR).with_context(|| format!("bind local udp socket at {}", STR_LOCAL_BIND_ADDR))?;
     socket.connect(str_udp_target).with_context(|| format!("connect udp socket to {}", str_udp_target))?;
 
+    // get parent pid, 0 as failure placeholder
+    let num_browser_pid = lookup_parent_pid().unwrap_or(0);
+    let arr_pid_prefix: [u8; NUM_PID_PREFIX_BYTES] = num_browser_pid.to_le_bytes();
+
     let stdin = std::io::stdin();
     let mut handle_stdin = stdin.lock();
 
+    // single reusable send buffer: the 4-byte prefix is constant, body is truncated/extended each iteration
+    let mut buf_out: Vec<u8> = Vec::with_capacity(NUM_PID_PREFIX_BYTES + 4096);
+    buf_out.extend_from_slice(&arr_pid_prefix);
+
     loop {
         let opt_frame = read_frame(&mut handle_stdin).context("read native messaging frame")?;
-        let Some(vec_frame) = opt_frame else { return Ok(()); };  // EOF or broken frame
-        if let Err(e) = socket.send(&vec_frame) { warn!("forward frame failed: {:#}", e); }
+        let Some(vec_frame) = opt_frame else { return Ok(()); };  // EOF or browser closed port
+
+        buf_out.truncate(NUM_PID_PREFIX_BYTES);
+        buf_out.extend_from_slice(&vec_frame);
+        if let Err(e) = socket.send(&buf_out) { warn!("forward frame failed: {:#}", e); }
     }
 }
 
