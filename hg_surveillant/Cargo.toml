@@ -9,11 +9,13 @@ path = "src/surveillant_lib.rs"
 
 [dependencies]
 hg_common = { workspace = true }
-anyhow = { workspace = true }
-tracing = { workspace = true }
-tokio = { workspace = true }
+anyhow    = { workspace = true }
+serde     = { workspace = true }
+tracing   = { workspace = true }
+tokio     = { workspace = true }
 
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
+serde_json = "1"
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_System_SystemInformation",

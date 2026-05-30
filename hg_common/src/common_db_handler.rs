@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use rusqlite::{params, Connection};
 use tracing::{debug, error, info};
 
@@ -16,6 +16,9 @@ const SQL_INSERT_USAGE_SEGMENT: &str =
         VALUES (?1, NULL, ?2, ?3, ?4, ?5, ?6, ?7, ?8)";
 const SQL_UPDATE_USAGE_SEGMENT: &str =
     "UPDATE usage_segments SET end_ms = ? WHERE rowid = (SELECT MAX(rowid) FROM usage_segments);";
+// updates the latest segment's url/tab_title with pid check
+const SQL_UPDATE_SEGMENT_WEB: &str =
+    "UPDATE usage_segments SET url = ?1, tab_title = ?2 WHERE rowid = (SELECT MAX(rowid) FROM usage_segments) AND pid = ?3";
 
 /*
     reader query sql
@@ -28,7 +31,7 @@ const SQL_SELECT_BY_TIME: &str =
 
 #[derive(Debug)]
 pub struct DbHandlerWriter {
-    connection: Connection,
+    mutex_conn: Mutex<Connection>,
 }
 
 impl DbHandlerWriter {
@@ -41,11 +44,12 @@ impl DbHandlerWriter {
         let cnt_segment_db: i64 = connection.query_row("SELECT COUNT(*) FROM usage_segments", [], |row| row.get(0))?;
 
         info!("{} records exist at table usage_segments", cnt_segment_db);
-        Ok( Self { connection } )
+        Ok( Self { mutex_conn: Mutex::new(connection) } )
     }
 
     pub fn register_segment(&self, state: EventType, start_ms: i64, opt_info: &Option<AppSnapshotInfo>) -> anyhow::Result<()> {
-        self.connection.execute(SQL_INSERT_USAGE_SEGMENT, params![
+        let conn = self.mutex_conn.lock().unwrap_or_else(|p| p.into_inner());
+        conn.execute(SQL_INSERT_USAGE_SEGMENT, params![
             start_ms,
             state as i32,
             opt_info.as_ref().map(|info| info.win_pid),
@@ -61,7 +65,8 @@ impl DbHandlerWriter {
     }
 
     pub fn update_segment(&self, end_ms: i64) -> anyhow::Result<()> {
-        self.connection.execute(SQL_UPDATE_USAGE_SEGMENT, params![end_ms])?;
+        let conn = self.mutex_conn.lock().unwrap_or_else(|p| p.into_inner());
+        conn.execute(SQL_UPDATE_USAGE_SEGMENT, params![end_ms])?;
 
         debug!("updated segment with end time {}", end_ms);
         Ok(())

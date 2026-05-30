@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tracing::{info, Level};
 
 use hg_common::{DbHandlerReader, DbHandlerWriter, HgConfig};
@@ -27,11 +27,15 @@ async fn main() -> anyhow::Result<()> {
     // load config
     let arc_config: Arc<HgConfig> = Arc::new(HgConfig::new(CONFIG_PATH)?);
     info!("deserialized config: {:?}", arc_config);
+    
+    // mutex pid for web info update
+    let arc_curr_pid: Arc<Mutex<u32>> = Arc::new(Mutex::new(0));
 
     // load internal components
     let arc_db_writer = Arc::new(DbHandlerWriter::new(Arc::clone(&arc_config)).expect("Failed to initialize database writer"));
     let arc_db_reader = Arc::new(DbHandlerReader::new(Arc::clone(&arc_config)).expect("Failed to initialize database reader"));
-    let mut tracker = UserTracker::new(Arc::clone(&arc_config), Arc::clone(&arc_db_writer));
+
+    let mut tracker = UserTracker::new(Arc::clone(&arc_config), Arc::clone(&arc_db_writer), Arc::clone(&arc_curr_pid));
 
     // activative
     tokio::select!{

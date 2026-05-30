@@ -1,7 +1,7 @@
 use hg_common::{EventType, HgConfig, AppSnapshotInfo, DbHandlerWriter};
 
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::ffi::OsString;
 use std::os::windows::ffi::OsStringExt;
 use std::time::Duration;
@@ -20,6 +20,8 @@ pub struct UserTracker {
     arc_config: Arc<HgConfig>,
     arc_db_handler: Arc<DbHandlerWriter>,
 
+    // latest foreground pid published to web listener
+    arc_curr_pid: Arc<Mutex<u32>>,
     // current segment info
     state: EventType,
     opt_app_info: Option<AppSnapshotInfo>,
@@ -37,10 +39,11 @@ impl Drop for UserTracker {
 }
 
 impl UserTracker {
-    pub fn new(arc_config: Arc<HgConfig>, arc_db_handler: Arc<DbHandlerWriter>) -> Self {
+    pub fn new(arc_config: Arc<HgConfig>, arc_db_handler: Arc<DbHandlerWriter>, arc_curr_pid: Arc<Mutex<u32>>) -> Self {
         Self {
             arc_config,
             arc_db_handler,
+            arc_curr_pid,
             state: EventType::Online,
             opt_app_info: None,
         }
@@ -69,6 +72,12 @@ impl UserTracker {
         let opt_foreground = Self::get_current_foreground_snapshot();
         let flag_foreground_switch = self.opt_app_info != opt_foreground;
         self.opt_app_info = opt_foreground;
+
+        // publish current pid for listener, 0 (no foreground) maps to the sentinel naturally
+        {
+            let mut guard = self.arc_curr_pid.lock().unwrap_or_else(|p| p.into_inner());
+            *guard = self.opt_app_info.as_ref().map_or(0, |info| info.win_pid);
+        }
 
         let timestamp = if legacy_state == EventType::Active && self.state == EventType::Idle { last_input_ms } else { now_ms };
         // state or foreground app changed or first time for registration
