@@ -13,6 +13,7 @@ hg_common  = { workspace = true }
 anyhow     = { workspace = true }
 tracing    = { workspace = true }
 
+serde_json = "1"
 tracing-subscriber = "0.3"
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",

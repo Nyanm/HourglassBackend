@@ -9,17 +9,20 @@
  stdout is owned by the Native Messaging protocol and must never be
  written to from this binary; all diagnostics go to the log file.
 
- Runtime loop for the Native Messaging Host. Reads length-prefixed JSON
- frames from stdin (the channel the Chromium-family browser opened
- when the extension called connectNative), augments each frame with a
- local receive timestamp, and forwards the result as one UDP datagram
- per frame to the hourglass backend.
+ Wire format toward hourglass is plain JSON: each native messaging
+ frame body coming off stdin is parsed, the parent browser pid (looked
+ up once at startup via the toolhelp32 snapshot) is injected as a
+ "browser_pid" field, and the augmented object is re-serialised and
+ sent as a single UDP datagram. Keeping the wire format pure JSON
+ means standard tools (tcpdump, hexdump, jq) can inspect the traffic
+ without knowing any custom framing rules.
 
  stdin EOF is the canonical "browser closed the port" signal and is
- treated as a clean shutdown. Per-frame parse / send failures emit a
- single warn line and the loop continues so a transient bad frame
- cannot tear down the port. Protocol-level breakage (truncated frame,
- oversized length header) returns Err so the process exits.
+ treated as a clean shutdown. Per-frame parse / serialize / send
+ failures emit a single warn line and the loop continues so a
+ transient bad frame cannot tear down the port. Protocol-level
+ breakage on stdin (truncated frame, oversized length header) returns
+ Err so the process exits.
 
  stdout is reserved for the Native Messaging protocol itself and is
  NEVER written to from here; warn lines go to the tracing subscriber
@@ -46,8 +49,8 @@ const NUM_MAX_PARENT_WALK: usize = 8;
 const NUM_MAX_FRAME_BYTES: usize = 1024 * 1024;
 // any free local port is fine since we only send; loopback bind keeps traffic local
 const STR_LOCAL_BIND_ADDR: &str = "127.0.0.1:0";
-// hourglass-side wire format: [4-byte LE u32: browser pid][native messaging json body]
-const NUM_PID_PREFIX_BYTES: usize = 4;
+// key under which the browser pid is injected into each forwarded JSON object
+const STR_BROWSER_PID_KEY: &str = "browser_pid";
 
 fn read_frame<R: Read>(reader: &mut R) -> anyhow::Result<Option<Vec<u8>>> {
     // UnexpectedEof at the very start of a frame is the legitimate "browser closed the port" signal
@@ -94,28 +97,34 @@ fn lookup_parent_pid() -> Option<u32> {
     }
 }
 
+fn forward_frame(socket: &UdpSocket, vec_frame: &[u8], num_browser_pid: u32) -> anyhow::Result<()> {
+    if vec_frame.is_empty() { return Ok(()); }
+
+    let mut value: serde_json::Value = serde_json::from_slice(vec_frame).context("parse extension json")?;
+    if let serde_json::Value::Object(map) = &mut value {
+        map.insert(STR_BROWSER_PID_KEY.to_string(), serde_json::Value::from(num_browser_pid));  // add parent pid info
+    }
+    let vec_out = serde_json::to_vec(&value).context("serialize augmented json")?;
+    socket.send(&vec_out).context("udp send")?;
+    Ok(())
+}
+
 pub fn run(str_udp_target: &str) -> anyhow::Result<()> {
     let socket = UdpSocket::bind(STR_LOCAL_BIND_ADDR).with_context(|| format!("bind local udp socket at {}", STR_LOCAL_BIND_ADDR))?;
     socket.connect(str_udp_target).with_context(|| format!("connect udp socket to {}", str_udp_target))?;
 
-    // get parent pid, 0 as failure placeholder
+    // pid is constant over receiver's lifetime; resolve once, 0 acts as the "unknown" sentinel downstream
     let num_browser_pid = lookup_parent_pid().unwrap_or(0);
-    let arr_pid_prefix: [u8; NUM_PID_PREFIX_BYTES] = num_browser_pid.to_le_bytes();
 
     let stdin = std::io::stdin();
     let mut handle_stdin = stdin.lock();
 
-    // single reusable send buffer: the 4-byte prefix is constant, body is truncated/extended each iteration
-    let mut buf_out: Vec<u8> = Vec::with_capacity(NUM_PID_PREFIX_BYTES + 4096);
-    buf_out.extend_from_slice(&arr_pid_prefix);
-
     loop {
         let opt_frame = read_frame(&mut handle_stdin).context("read native messaging frame")?;
         let Some(vec_frame) = opt_frame else { return Ok(()); };  // EOF or browser closed port
-
-        buf_out.truncate(NUM_PID_PREFIX_BYTES);
-        buf_out.extend_from_slice(&vec_frame);
-        if let Err(e) = socket.send(&buf_out) { warn!("forward frame failed: {:#}", e); }
+        if let Err(e) = forward_frame(&socket, &vec_frame, num_browser_pid) {
+            warn!("forward frame failed: {:#}", e);
+        }
     }
 }
 
