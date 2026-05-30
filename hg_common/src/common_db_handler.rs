@@ -71,6 +71,14 @@ impl DbHandlerWriter {
         debug!("updated segment with end time {}", end_ms);
         Ok(())
     }
+
+    pub fn update_segment_web(&self, str_url: &str, str_tab_title: &str, num_browser_pid: u32) -> anyhow::Result<bool> {
+        let conn = self.mutex_conn.lock().unwrap_or_else(|p| p.into_inner());
+        let cnt_changed = conn.execute(SQL_UPDATE_SEGMENT_WEB, params![str_url, str_tab_title, num_browser_pid])?;
+        if cnt_changed == 0 { debug!("update_segment_web matched 0 rows for pid={}", num_browser_pid); }  // fail to find browser record
+        else { debug!("update_segment_web set url for pid={}", num_browser_pid); }
+        Ok(cnt_changed > 0)
+    }
 }
 
 #[derive(Debug)]

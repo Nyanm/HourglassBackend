@@ -2,7 +2,7 @@ use std::sync::{Arc, Mutex};
 use tracing::{info, Level};
 
 use hg_common::{DbHandlerReader, DbHandlerWriter, HgConfig};
-use hg_surveillant::UserTracker;
+use hg_surveillant::{UserTracker, WebListener};
 
 pub(crate) const CONFIG_PATH: &str = "config.yaml";
 
@@ -36,10 +36,12 @@ async fn main() -> anyhow::Result<()> {
     let arc_db_reader = Arc::new(DbHandlerReader::new(Arc::clone(&arc_config)).expect("Failed to initialize database reader"));
 
     let mut tracker = UserTracker::new(Arc::clone(&arc_config), Arc::clone(&arc_db_writer), Arc::clone(&arc_curr_pid));
+    let web_listener = WebListener::new(Arc::clone(&arc_config), Arc::clone(&arc_db_writer), Arc::clone(&arc_curr_pid));
 
     // activative
     tokio::select!{
         _ = tracker.run() => { }
+        _ = web_listener.run() => { }
         _ = tokio::signal::ctrl_c() => { }
     }
 
