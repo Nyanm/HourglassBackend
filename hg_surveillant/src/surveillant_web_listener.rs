@@ -80,8 +80,6 @@ impl WebListener {
 
     fn handle_packet(&self, packet: &[u8]) -> anyhow::Result<()> {
         let msg: WebReceiverMessage = serde_json::from_slice(packet).context("parse udp json")?;
-        trace!("web msg event='{}' focused={} pid={}", msg.event, msg.focused, msg.browser_pid);
-
         if !msg.focused { debug!("ignored: focused=false"); return Ok(()); }
 
         let num_curr_pid = *self.arc_curr_pid.lock().unwrap_or_else(|p| p.into_inner());
@@ -95,6 +93,8 @@ impl WebListener {
 
         let flag_applied = self.arc_db_handler.update_segment_web(&str_url, &str_title, msg.browser_pid)?;
         if !flag_applied { debug!("update affected 0 rows after race"); }
+
+        debug!("update web info: event={}, url={}, title={}", msg.event, str_url, str_title);
         Ok(())
     }
 }

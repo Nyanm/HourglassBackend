@@ -86,7 +86,7 @@ impl UserTracker {
             return Ok(())
         }
 
-        trace!("keep on [{}]", self.state);
+        debug!("keep on [{}]", self.state);
         Ok(())
     }
 
@@ -166,7 +166,7 @@ impl UserTracker {
                 window_title: str_window_title,
                 opt_web_info: None};
 
-            trace!("record app snapshot: {:?}", ret_snapshot);
+            debug!("record app snapshot: {:?}", ret_snapshot);
             Some(ret_snapshot)
         }
     }
