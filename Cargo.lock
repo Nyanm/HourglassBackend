@@ -232,6 +232,7 @@ name = "hourglass_backend"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "hg_common",
  "hg_surveillant",
  "hg_witness",

@@ -1,10 +1,42 @@
+use std::fmt;
 use std::sync::{Arc, Mutex};
-use tracing::{info, Level};
+use chrono::Local;
+use tracing::{Event, Subscriber, info, Level};
+use tracing_subscriber::fmt::{FmtContext, FormatEvent, FormatFields};
+use tracing_subscriber::fmt::format::Writer;
+use tracing_subscriber::registry::LookupSpan;
 
 use hg_common::{DbHandlerReader, DbHandlerWriter, HgConfig};
 use hg_surveillant::{UserTracker, WebListener};
 
 pub(crate) const CONFIG_PATH: &str = "config.yaml";
+
+// log header: HH:MM:SS.mmm in local time, level, last module-path segment
+struct CompactLocalFmt;
+impl<S, N> FormatEvent<S, N> for CompactLocalFmt
+where
+    S: Subscriber + for<'a> LookupSpan<'a>,
+    N: for<'a> FormatFields<'a> + 'static,
+{
+    fn format_event(&self, ctx: &FmtContext<'_, S, N>, mut writer: Writer<'_>, event: &Event<'_>) -> fmt::Result {
+        let metadata = event.metadata();
+
+        // local time, hh:mm:ss.mmm
+        write!(writer, "{} ", Local::now().format("%H:%M:%S%.3f"))?;
+
+        // fixed-width level so different rows align visually
+        write!(writer, "{:>5} ", metadata.level())?;
+
+        // last segment of module path; e.g. "hg_surveillant::surveillant_tracker" -> "surveillant_tracker"
+        let str_target = metadata.target();
+        let str_short = str_target.rsplit("::").next().unwrap_or(str_target);
+        write!(writer, "{}: ", str_short)?;
+
+        // delegate field/message rendering to the default formatter
+        ctx.format_fields(writer.by_ref(), event)?;
+        writeln!(writer)
+    }
+}
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -16,12 +48,11 @@ async fn main() -> anyhow::Result<()> {
         .build("./log")?;
     let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
 
-    let format = tracing_subscriber::fmt::format().with_level(true).with_target(true);
     tracing_subscriber::fmt()
         .with_max_level(Level::TRACE)
         .with_writer(non_blocking)
         .with_ansi(false)
-        .event_format(format)
+        .event_format(CompactLocalFmt)
         .init();
 
     // load config

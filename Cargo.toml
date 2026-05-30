@@ -33,6 +33,7 @@ hg_surveillant = { workspace = true }
 hg_witness = { workspace = true }
 
 anyhow = { workspace = true }
+chrono = { workspace = true }
 tracing = { workspace = true }
 tokio = { workspace = true }
 
