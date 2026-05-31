@@ -6,8 +6,10 @@ use tracing_subscriber::fmt::{FmtContext, FormatEvent, FormatFields};
 use tracing_subscriber::fmt::format::Writer;
 use tracing_subscriber::registry::LookupSpan;
 
-use hg_common::{DbHandlerReader, DbHandlerWriter, HgConfig};
-use hg_surveillant::{UserTracker, WebListener};
+use hg_common::{DbHandlerReader, DbHandlerWriter, HgConfig, TrackerEvent};
+use hg_surveillant::{ForegroundHook, IdleTicker, UserTracker, WebListener};
+
+use tokio::sync::mpsc::unbounded_channel;
 
 pub(crate) const CONFIG_PATH: &str = "config.yaml";
 
@@ -62,16 +64,23 @@ async fn main() -> anyhow::Result<()> {
     // mutex pid for web info update
     let arc_curr_pid: Arc<Mutex<u32>> = Arc::new(Mutex::new(0));
 
+    // event channel: winevent pump + idle ticker (producers) -> tracker actor (sole consumer)
+    let (tx_event, rx_event) = unbounded_channel::<TrackerEvent>();
+
     // load internal components
     let arc_db_writer = Arc::new(DbHandlerWriter::new(Arc::clone(&arc_config)).expect("Failed to initialize database writer"));
     let arc_db_reader = Arc::new(DbHandlerReader::new(Arc::clone(&arc_config)).expect("Failed to initialize database reader"));
-
-    let mut tracker = UserTracker::new(Arc::clone(&arc_config), Arc::clone(&arc_db_writer), Arc::clone(&arc_curr_pid));
+    let mut tracker = UserTracker::new(Arc::clone(&arc_config), Arc::clone(&arc_db_writer), Arc::clone(&arc_curr_pid), rx_event);
     let web_listener = WebListener::new(Arc::clone(&arc_config), Arc::clone(&arc_db_writer), Arc::clone(&arc_curr_pid));
+    let idle_ticker = IdleTicker::new(Arc::clone(&arc_config), tx_event.clone());
+
+    // install the foreground hook; kept alive until end of scope so its Drop unhooks + joins the pump thread
+    let _foreground_hook = ForegroundHook::start(tx_event.clone()).expect("Failed to install foreground hook");
 
     // activative
     tokio::select!{
         _ = tracker.run() => { }
+        _ = idle_ticker.run() => { }
         _ = web_listener.run() => { }
         _ = tokio::signal::ctrl_c() => { }
     }

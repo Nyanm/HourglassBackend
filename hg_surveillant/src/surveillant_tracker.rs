@@ -1,18 +1,29 @@
-use hg_common::{EventType, HgConfig, AppSnapshotInfo, DbHandlerWriter};
+/*
+ The tracker is the single owner of the usage-segment state machine. It no longer polls the
+ foreground window itself; instead it passively consumes a stream of TrackerEvent values produced
+ by two independent sources:
+   - surveillant_winevent: a SetWinEventHook message pump that emits ForegroundChanged on every
+     EVENT_SYSTEM_FOREGROUND, i.e. the moment the OS switches the active window.
+   - surveillant_idle: a timer that emits IdleTick so we can re-evaluate Active/Idle, which has no
+     native Win32 event.
+ Because every mutation of `state` / `opt_app_info` and every database write happens on this one
+ task, the previous cross-thread race around the published pid is removed by construction.
+ */
+
+use hg_common::{EventType, HgConfig, AppSnapshotInfo, DbHandlerWriter, TrackerEvent};
+use crate::surveillant_idle::IdleTicker;
 
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::ffi::OsString;
 use std::os::windows::ffi::OsStringExt;
-use std::time::Duration;
-use anyhow::{bail, Context};
+use anyhow::Context;
 use tracing::{debug, trace};
 use chrono::Utc;
+use tokio::sync::mpsc::UnboundedReceiver;
 
-use windows_sys::Win32::Foundation::CloseHandle;
-use windows_sys::Win32::System::SystemInformation::GetTickCount64;
+use windows_sys::Win32::Foundation::{CloseHandle, HWND};
 use windows_sys::Win32::System::Threading::{OpenProcess, QueryFullProcessImageNameW, PROCESS_QUERY_LIMITED_INFORMATION};
-use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetLastInputInfo, LASTINPUTINFO};
 use windows_sys::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId};
 
 #[derive(Debug)]
@@ -22,6 +33,9 @@ pub struct UserTracker {
 
     // latest foreground pid published to web listener
     arc_curr_pid: Arc<Mutex<u32>>,
+    // inbound event stream; this task is the sole consumer
+    rx_event: UnboundedReceiver<TrackerEvent>,
+
     // current segment info
     state: EventType,
     opt_app_info: Option<AppSnapshotInfo>,
@@ -39,55 +53,77 @@ impl Drop for UserTracker {
 }
 
 impl UserTracker {
-    pub fn new(arc_config: Arc<HgConfig>, arc_db_handler: Arc<DbHandlerWriter>, arc_curr_pid: Arc<Mutex<u32>>) -> Self {
-        Self {
-            arc_config,
-            arc_db_handler,
-            arc_curr_pid,
-            state: EventType::Online,
-            opt_app_info: None,
-        }
+    pub fn new(arc_config: Arc<HgConfig>, arc_db_handler: Arc<DbHandlerWriter>, arc_curr_pid: Arc<Mutex<u32>>, rx_event: UnboundedReceiver<TrackerEvent>, ) -> Self {
+        Self { arc_config, arc_db_handler, arc_curr_pid, rx_event, state: EventType::Online, opt_app_info: None, }
     }
 
+    // seed one initial segment, then passively dispatch events until the channel closes
     pub async fn run(&mut self) -> anyhow::Result<()> {
-        let interval = Duration::from_millis(self.arc_config.pool_interval_ms as u64);
-        loop {
-            self.tick()?;
-            tokio::time::sleep(interval).await;
+        self.seed_initial()?;
+
+        while let Some(event) = self.rx_event.recv().await {
+            match event {
+                TrackerEvent::ForegroundChanged { hwnd_addr, at_ms } => self.on_foreground(hwnd_addr, at_ms)?,
+                TrackerEvent::IdleTick => self.on_idle_tick()?,
+                TrackerEvent::Shutdown => { debug!("tracker received shutdown"); break; }
+            }
         }
+
+        Ok(())
     }
 
-    fn tick(&mut self) -> anyhow::Result<()> {
+    // one-shot startup sample so the first segment carries the current app + idle state
+    fn seed_initial(&mut self) -> anyhow::Result<()> {
         let now_ms = Utc::now().timestamp_millis();
-        trace!("tracker ticks at [{}]", now_ms);
 
-        // get current state
-        let last_input_ms = Self::get_last_input_time(now_ms).context("Failed to get last input info")?;
-        let legacy_state = self.state;
+        let last_input_ms = IdleTicker::get_last_input_ms(now_ms).context("Failed to get last input info")?;
         self.state = if now_ms - last_input_ms >= self.arc_config.idle_timeout_ms { EventType::Idle } else { EventType::Active };
-        let flag_state_change = legacy_state != self.state;
-        trace!("idle for {} ms", now_ms - last_input_ms);
 
-        // get current foreground info
-        let opt_foreground = Self::get_current_foreground_snapshot();
+        self.opt_app_info = Self::current_foreground_snapshot();
+        self.publish_pid();
+
+        self.register_database(now_ms)?;
+        debug!("seeded initial segment with state [{}]", self.state);
+        Ok(())
+    }
+
+    // resolve the new foreground window, refresh the published pid, and open a new segment on a real switch
+    fn on_foreground(&mut self, hwnd_addr: isize, at_ms: i64) -> anyhow::Result<()> {
+        let hwnd = hwnd_addr as HWND;
+        let opt_foreground = Self::snapshot_from_hwnd(hwnd);
         let flag_foreground_switch = self.opt_app_info != opt_foreground;
         self.opt_app_info = opt_foreground;
 
-        // publish current pid for listener, 0 (no foreground) maps to the sentinel naturally
-        {
-            let mut guard = self.arc_curr_pid.lock().unwrap_or_else(|p| p.into_inner());
-            *guard = self.opt_app_info.as_ref().map_or(0, |info| info.win_pid);
-        }
+        self.publish_pid();
 
-        let timestamp = if legacy_state == EventType::Active && self.state == EventType::Idle { last_input_ms } else { now_ms };
-        // state or foreground app changed or first time for registration
-        if flag_state_change || flag_foreground_switch || legacy_state == EventType::Online {
-            self.register_database(timestamp)?;
-            return Ok(())
+        if flag_foreground_switch {
+            self.register_database(at_ms)?;
+            debug!("foreground switched, registered segment");
         }
-
-        debug!("keep on [{}]", self.state);
         Ok(())
+    }
+
+    // re-evaluate Active/Idle on a timer poke and open a new segment only when the state flips
+    fn on_idle_tick(&mut self) -> anyhow::Result<()> {
+        let now_ms = Utc::now().timestamp_millis();
+
+        let last_input_ms = IdleTicker::get_last_input_ms(now_ms).context("Failed to get last input info")?;
+        let legacy_state = self.state;
+        self.state = if now_ms - last_input_ms >= self.arc_config.idle_timeout_ms { EventType::Idle } else { EventType::Active };
+        trace!("idle for {} ms", now_ms - last_input_ms);
+
+        if legacy_state != self.state {
+            // backdate the Active->Idle boundary to the last real input, otherwise stamp now
+            let timestamp = if legacy_state == EventType::Active && self.state == EventType::Idle { last_input_ms } else { now_ms };
+            self.register_database(timestamp)?;
+            debug!("state changed [{}] -> [{}], registered segment", legacy_state, self.state);
+        }
+        Ok(())
+    }
+
+    fn publish_pid(&self) {
+        let mut guard = self.arc_curr_pid.lock().unwrap_or_else(|p| p.into_inner());
+        *guard = self.opt_app_info.as_ref().map_or(0, |info| info.win_pid);
     }
 
     fn register_database(&self, timestamp: i64) -> anyhow::Result<()> {
@@ -98,26 +134,14 @@ impl UserTracker {
         Ok(())
     }
 
-    fn get_last_input_time(now_ms: i64) -> anyhow::Result<i64> {
-        let mut last_input_info = LASTINPUTINFO {
-            cbSize: size_of::<LASTINPUTINFO>() as u32,
-            dwTime: 0,
-        };
-
-        unsafe {
-            if GetLastInputInfo(&mut last_input_info) == 0 { bail!("GetLastInputInfo failed"); }
-
-            let tick_ms_32 = GetTickCount64() as u32;
-            let idle_ms = tick_ms_32.wrapping_sub(last_input_info.dwTime) as i64;
-
-            Ok(now_ms - idle_ms)
-        }
+    fn current_foreground_snapshot() -> Option<AppSnapshotInfo> {
+        unsafe { Self::snapshot_from_hwnd(GetForegroundWindow()) }
     }
 
-    fn get_current_foreground_snapshot() -> Option<AppSnapshotInfo> {
+    // resolve a given HWND into a snapshot
+    fn snapshot_from_hwnd(hwnd: HWND) -> Option<AppSnapshotInfo> {
         unsafe {
-            let hwnd = GetForegroundWindow();
-            if hwnd == std::ptr::null_mut() { return None; }
+            if hwnd.is_null() { return None; }
 
             let mut pid: u32 = 0;
             GetWindowThreadProcessId(hwnd, &mut pid);

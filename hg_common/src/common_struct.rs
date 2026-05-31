@@ -11,6 +11,14 @@ pub enum EventType {
     Offline,
 }
 
+// input protocol consumed by the tracker actor; produced by the winevent pump and the idle ticker
+#[derive(Debug, Clone, Copy, strum_macros::Display)]
+pub enum TrackerEvent {
+    ForegroundChanged { hwnd_addr: isize, at_ms: i64 },  // hwnd carried as isize because HWND is not Send
+    IdleTick,
+    Shutdown,
+}
+
 #[derive(Debug, Clone)]
 pub struct WebSnapshotInfo {
     pub tab_title: String,
@@ -45,7 +53,7 @@ pub struct SegmentInfo {
 #[derive(Debug, Deserialize, Clone)]
 pub struct HgConfig {
     pub db_path: String,
-    pub pool_interval_ms: i64,
+    pub idle_check_interval_ms: i64,
     pub idle_timeout_ms: i64,
     pub web_receiver_udp_addr: String,
 }

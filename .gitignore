@@ -3,4 +3,4 @@
 /.claude
 /log
 /example
-*.sqlite
+*.sqlite*
