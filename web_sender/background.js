@@ -8,7 +8,6 @@
 
 const STR_NATIVE_HOST = "com.hourglass.web_receiver";
 const DEBOUNCE_MS = 120;
-const WINDOW_ID_NONE = -1;
 
 const EVENT_ON_START      = "on_start";
 const EVENT_FOCUS_GAINED  = "focus_gained";
@@ -39,7 +38,7 @@ function connect_native() {
         port.onDisconnect.addListener(() => {
             // lastError must be read inside the callback, or it gets cleared.
             const err = chrome.runtime.lastError;
-            if (err) console.warn("[hourglass] native port disconnected:", err.message);
+            if (err) console.warn("[hg] native port disconnected:", err.message);
             native_port = null;
             str_last_sent_key = null;
         });
@@ -47,7 +46,7 @@ function connect_native() {
         port.onMessage.addListener(() => { });
         native_port = port;
     } catch (e) {
-        console.warn("[hourglass] connectNative failed:", e);
+        console.warn("[hg] connectNative failed:", e);
         native_port = null;
     }
     return native_port;
@@ -84,8 +83,9 @@ function schedule_send(str_event) {
 }
 
 function flush_send() {
-    debounce_timer = null;
+    console.log("[hg] flush_send", { pending_event: str_pending_event, state });
 
+    debounce_timer = null;
     const str_event = str_pending_event;
     str_pending_event = null;
     if (!str_event) return;  // guard against a stray flush with no event tag staged
@@ -104,7 +104,7 @@ function flush_send() {
     } catch (e) {
         // postMessage throws synchronously when the port is already half-closed
         // drop refs and clean port info so the next event reconnects from scratch.
-        console.warn("[hourglass] postMessage failed:", e);
+        console.warn("[hg] postMessage failed:", e);
         native_port = null;
         str_last_sent_key = null;
     }
@@ -127,6 +127,7 @@ function adopt_tab(tab) {
 }
 
 async function refresh_from_window(window_id, str_event) {
+    console.log("[hg] refresh from window", { window_id, str_event });
     // callers guarantee window_id refers to a real, focused window
     try {
         const vec_tabs = await chrome.tabs.query({ active: true, windowId: window_id });
@@ -137,34 +138,46 @@ async function refresh_from_window(window_id, str_event) {
         adopt_tab(vec_tabs[0]);
         schedule_send(str_event);
     } catch (e) {
-        console.warn("[hourglass] tabs.query failed:", e);
+        console.warn("[hg] tabs.query failed:", e);
         clear_focus();
     }
 }
 
-// focus changed
-chrome.windows.onFocusChanged.addListener((window_id) => {
-    if (window_id === WINDOW_ID_NONE) {  // lose focus
+chrome.windows.onFocusChanged.addListener(async (window_id) => {
+    console.log("[hg] onFocusChanged", { window_id });
+
+    try {
+        const win = await chrome.windows.getLastFocused({ populate: false });
+        if (win && win.focused) {
+            await refresh_from_window(win.id, EVENT_FOCUS_GAINED);
+        } else {
+            // no Chromium window has OS focus right now -> clear state, do not emit
+            clear_focus();
+        }
+    } catch (e) {
+        console.warn("[hg] getLastFocused failed in onFocusChanged:", e);
         clear_focus();
-        return;
     }
-    refresh_from_window(window_id, EVENT_FOCUS_GAINED).then(_ => {});
 });
 
 // active tab change inside a window
 // ignore it when onActivated happens on backstage
 chrome.tabs.onActivated.addListener(({ tabId, windowId }) => {
+    console.log("[hg] onActivated", { tabId, windowId, state_window: state.window_id });
+
     if (state.flag_focused && state.window_id !== null && windowId !== state.window_id) return;
     chrome.tabs.get(tabId).then((tab) => {
         adopt_tab(tab);
         schedule_send(EVENT_TAB_ACTIVATED);
     }).catch((e) => {
-        console.warn("[hourglass] tabs.get failed:", e);
+        console.warn("[hg] tabs.get failed:", e);
     });
 });
 
 // tab metadata updates from the currently viewed tab
 chrome.tabs.onUpdated.addListener((tab_id, change_info, tab) => {
+    console.log("[hg] onUpdated", { tab_id, change_info, state_tab_id: state.tab_id, flag_focused: state.flag_focused });
+
     if (!state.flag_focused) return;
     if (tab_id !== state.tab_id) return;
 
@@ -219,11 +232,11 @@ async function bootstrap() {
         if (win && win.focused) {
             await refresh_from_window(win.id, EVENT_ON_START);
         } else {
-            // no browser window (if)
             clear_focus();
+            console.log("[hg] no browser window");
         }
     } catch (e) {
-        console.warn("[hourglass] bootstrap failed:", e);
+        console.warn("[hg] bootstrap failed:", e);
     }
 }
 
