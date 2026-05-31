@@ -31,9 +31,10 @@
 
 use std::sync::{Arc, Mutex};
 use anyhow::Context;
+use chrono::Utc;
 use serde::Deserialize;
 use tokio::net::UdpSocket;
-use tracing::{debug, info, trace, warn};
+use tracing::{debug, info, warn};
 
 use hg_common::{DbHandlerWriter, HgConfig};
 
@@ -90,11 +91,10 @@ impl WebListener {
 
         let str_url = msg.url.unwrap_or_default();
         let str_title = msg.title.unwrap_or_default();
+        let now_ms = Utc::now().timestamp_millis();
+        self.arc_db_handler.apply_web_update(&str_url, &str_title, msg.browser_pid, now_ms)?;
 
-        let flag_applied = self.arc_db_handler.update_segment_web(&str_url, &str_title, msg.browser_pid)?;
-        if !flag_applied { debug!("update affected 0 rows after race"); }
-
-        debug!("update web info: event={}, url={}, title={}", msg.event, str_url, str_title);
+        debug!("apply_web_update dispatched: event={} url={} title={}", msg.event, str_url, str_title);
         Ok(())
     }
 }

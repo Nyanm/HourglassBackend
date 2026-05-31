@@ -10,7 +10,7 @@
 ### 命名规范
 - rust代码首要遵循rfc 430规范来控制变量名中大小写与下划线的使用
 - 类型命名使用大驼峰`ManageInfo`，变量使用小写下划线`timer_t340`，常量大写下划线`EXPIRE_TIME_MS`
-- 布尔值使用`bool`或者`flag`开头，字符串使用`str`开头
+- 布尔值使用`is`或者`flag`开头，字符串使用`str`开头
 - 具有特殊容器的变量需要在变量前简要说明变量的容器类型，如共享指针`arc_db_handler`，列表`vec_history_info`，不超过四个字母
 - 如果变量具有现实世界的单位，需要在变量最后加上单位名称，如时间`time_to_live_ms`，频率`band_width_fdd_khz`
 - rust代码的文件名需要在文件名最前方添加当前模组名，如`hg_common`中的文件都要以`common`开头
