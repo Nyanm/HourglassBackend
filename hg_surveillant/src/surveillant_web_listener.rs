@@ -1,42 +1,31 @@
 /*
- Listens on a loopback UDP socket for messages forwarded by web_receiver
- and writes the current page's url + tab title onto the in-progress
- usage segment.
+ Pure unpacker for the loopback UDP channel fed by web_receiver. This module's only job is transport:
+ receive a datagram, parse the self-contained JSON into WebReportInfo, and forward it to the tracker
+ actor through the shared TrackerEvent channel. It no longer reads the foreground pid and no longer
+ touches the database.
 
- Wire format is pure JSON: web_receiver parses the native messaging
- frame, injects the browser's pid into the top-level object as
- "browser_pid", and re-serialises. Each UDP datagram is therefore a
- single self-contained JSON object that tools like jq / wireshark can
- inspect without any custom framing knowledge.
+ Wire format is pure JSON: web_receiver parses the native messaging frame, injects the browser's pid
+ into the top-level object as "browser_pid", and re-serialises. Each UDP datagram is therefore a single
+ self-contained JSON object that tools like jq / wireshark can inspect without any custom framing.
 
- Match policy:
-   1. JSON must parse into the minimal expected shape; unknown extra
-      fields are tolerated for forward compatibility with future
-      extension versions.
-   2. The browser_pid from the message must be non-zero (zero means
-      web_receiver's parent-process lookup failed and the message has
-      no verifiable origin).
-   3. browser_pid must equal the pid the tracker most recently
-      published into the shared snapshot. This guards against late
-      packets from a browser that is no longer in the foreground.
-   4. The SQL UPDATE itself also re-asserts the pid, defending against
-      a tracker tick that lands between our match check and the
-      database call.
-
- All six event tags emitted by the extension (on_start, focus_gained,
- tab_activated, url_changed, page_loaded, tab_replaced) are treated
- the same: any of them triggers an UPDATE. The event field is logged
- for diagnostics but does not gate the write.
+ All policy now lives on the tracker actor (single owner of the segment state), which keeps the former
+ cross-thread pid race from existing at all:
+   1. focused filtering,
+   2. browser_pid != 0 and equality against the actor's current foreground pid,
+   3. empty-url skip and the fill / dedup / fork SQL.
+ The six extension event tags (on_start, focus_gained, tab_activated, url_changed, page_loaded,
+ tab_replaced) are forwarded verbatim; the tag is carried for diagnostics only.
  */
 
-use std::sync::{Arc, Mutex};
+use hg_common::{HgConfig, TrackerEvent, WebReportInfo};
+
+use std::sync::Arc;
 use anyhow::Context;
 use chrono::Utc;
 use serde::Deserialize;
 use tokio::net::UdpSocket;
+use tokio::sync::mpsc::UnboundedSender;
 use tracing::{debug, info, warn};
-
-use hg_common::{DbHandlerWriter, HgConfig};
 
 
 // native messaging frames are capped at 1 MiB but real ones are far smaller
@@ -55,13 +44,12 @@ struct WebReceiverMessage {
 #[derive(Debug)]
 pub struct WebListener {
     arc_config: Arc<HgConfig>,
-    arc_db_handler: Arc<DbHandlerWriter>,
-    arc_curr_pid: Arc<Mutex<u32>>,  // 0 is the agreed sentinel
+    tx_event: UnboundedSender<TrackerEvent>,  // forwards unpacked reports to the tracker actor
 }
 
 impl WebListener {
-    pub fn new(arc_config: Arc<HgConfig>, arc_db_handler: Arc<DbHandlerWriter>, arc_curr_pid: Arc<Mutex<u32>>) -> Self {
-        Self { arc_config, arc_db_handler, arc_curr_pid }
+    pub fn new(arc_config: Arc<HgConfig>, tx_event: UnboundedSender<TrackerEvent>) -> Self {
+        Self { arc_config, tx_event }
     }
 
     pub async fn run(&self) -> anyhow::Result<()> {
@@ -81,20 +69,19 @@ impl WebListener {
 
     fn handle_packet(&self, packet: &[u8]) -> anyhow::Result<()> {
         let msg: WebReceiverMessage = serde_json::from_slice(packet).context("parse udp json")?;
-        if !msg.focused { debug!("ignored: focused=false"); return Ok(()); }
 
-        let num_curr_pid = *self.arc_curr_pid.lock().unwrap_or_else(|p| p.into_inner());
-        if msg.browser_pid == 0 || num_curr_pid != msg.browser_pid {  // fail to query parent pid or incompatible pid (not current foreground)
-            debug!("pid mismatch: msg={} curr={}, drop", msg.browser_pid, num_curr_pid);
-            return Ok(());
-        }
+        let at_ms = Utc::now().timestamp_millis();
+        let report = WebReportInfo {
+            str_event: msg.event,
+            is_focused: msg.focused,
+            browser_pid: msg.browser_pid,
+            opt_url: msg.url,
+            opt_title: msg.title,
+            at_ms,
+        };
+        debug!("unpacked web report: event={} focused={} pid={}", report.str_event, report.is_focused, report.browser_pid);
 
-        let str_url = msg.url.unwrap_or_default();
-        let str_title = msg.title.unwrap_or_default();
-        let now_ms = Utc::now().timestamp_millis();
-        self.arc_db_handler.apply_web_update(&str_url, &str_title, msg.browser_pid, now_ms)?;
-
-        debug!("apply_web_update dispatched: event={} url={} title={}", msg.event, str_url, str_title);
+        self.tx_event.send(TrackerEvent::WebUpdate(report)).context("forward web update to tracker")?;
         Ok(())
     }
 }

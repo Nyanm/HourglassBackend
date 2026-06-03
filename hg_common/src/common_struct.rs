@@ -11,11 +11,23 @@ pub enum EventType {
     Offline,
 }
 
-// input protocol consumed by the tracker actor; produced by the winevent pump and the idle ticker
-#[derive(Debug, Clone, Copy, strum_macros::Display)]
+// unpacked browser report forwarded by WebListener to the tracker actor; the actor owns all policy
+#[derive(Debug, Clone)]
+pub struct WebReportInfo {
+    pub str_event: String,
+    pub is_focused: bool,
+    pub browser_pid: u32,
+    pub opt_url: Option<String>,
+    pub opt_title: Option<String>,
+    pub at_ms: i64,
+}
+
+// unified input protocol consumed by the tracker actor; produced by the winevent pump, idle ticker, web unpacker
+#[derive(Debug, Clone, strum_macros::Display)]
 pub enum TrackerEvent {
     ForegroundChanged { hwnd_addr: isize, at_ms: i64 },  // hwnd carried as isize because HWND is not Send
     IdleTick,
+    WebUpdate(WebReportInfo),
     Shutdown,
 }
 

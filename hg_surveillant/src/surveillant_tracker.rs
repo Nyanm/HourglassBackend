@@ -1,20 +1,23 @@
 /*
  The tracker is the single owner of the usage-segment state machine. It no longer polls the
  foreground window itself; instead it passively consumes a stream of TrackerEvent values produced
- by two independent sources:
+ by three independent sources:
    - surveillant_winevent: a SetWinEventHook message pump that emits ForegroundChanged on every
      EVENT_SYSTEM_FOREGROUND, i.e. the moment the OS switches the active window.
    - surveillant_idle: a timer that emits IdleTick so we can re-evaluate Active/Idle, which has no
      native Win32 event.
+   - surveillant_web_listener: a pure UDP unpacker that emits WebUpdate(WebReportInfo) per browser
+     report; this task applies the focused + pid policy and the fill/fork DB write.
  Because every mutation of `state` / `opt_app_info` and every database write happens on this one
- task, the previous cross-thread race around the published pid is removed by construction.
+ task, the foreground pid is matched against our own state and the previous cross-thread race
+ (and the shared arc_curr_pid mutex) is removed by construction.
  */
 
-use hg_common::{EventType, HgConfig, AppSnapshotInfo, DbHandlerWriter, TrackerEvent};
+use hg_common::{EventType, HgConfig, AppSnapshotInfo, DbHandlerWriter, TrackerEvent, WebReportInfo};
 use crate::surveillant_idle::IdleTicker;
 
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::ffi::OsString;
 use std::os::windows::ffi::OsStringExt;
 use anyhow::Context;
@@ -31,8 +34,6 @@ pub struct UserTracker {
     arc_config: Arc<HgConfig>,
     arc_db_handler: Arc<DbHandlerWriter>,
 
-    // latest foreground pid published to web listener
-    arc_curr_pid: Arc<Mutex<u32>>,
     // inbound event stream; this task is the sole consumer
     rx_event: UnboundedReceiver<TrackerEvent>,
 
@@ -53,8 +54,8 @@ impl Drop for UserTracker {
 }
 
 impl UserTracker {
-    pub fn new(arc_config: Arc<HgConfig>, arc_db_handler: Arc<DbHandlerWriter>, arc_curr_pid: Arc<Mutex<u32>>, rx_event: UnboundedReceiver<TrackerEvent>, ) -> Self {
-        Self { arc_config, arc_db_handler, arc_curr_pid, rx_event, state: EventType::Online, opt_app_info: None, }
+    pub fn new(arc_config: Arc<HgConfig>, arc_db_handler: Arc<DbHandlerWriter>, rx_event: UnboundedReceiver<TrackerEvent>, ) -> Self {
+        Self { arc_config, arc_db_handler, rx_event, state: EventType::Online, opt_app_info: None, }
     }
 
     // seed one initial segment, then passively dispatch events until the channel closes
@@ -65,6 +66,7 @@ impl UserTracker {
             match event {
                 TrackerEvent::ForegroundChanged { hwnd_addr, at_ms } => self.on_foreground(hwnd_addr, at_ms)?,
                 TrackerEvent::IdleTick => self.on_idle_tick()?,
+                TrackerEvent::WebUpdate(report) => self.on_web_update(report)?,
                 TrackerEvent::Shutdown => { debug!("tracker received shutdown"); break; }
             }
         }
@@ -80,7 +82,6 @@ impl UserTracker {
         self.state = if now_ms - last_input_ms >= self.arc_config.idle_timeout_ms { EventType::Idle } else { EventType::Active };
 
         self.opt_app_info = Self::current_foreground_snapshot();
-        self.publish_pid();
 
         self.register_database(now_ms)?;
         debug!("seeded initial segment with state [{}]", self.state);
@@ -94,12 +95,31 @@ impl UserTracker {
         let flag_foreground_switch = self.opt_app_info != opt_foreground;
         self.opt_app_info = opt_foreground;
 
-        self.publish_pid();
-
         if flag_foreground_switch {
             self.register_database(at_ms)?;
             debug!("foreground switched, registered segment");
         }
+        Ok(())
+    }
+
+    // apply one unpacked browser report: focused + pid gate against our own foreground, then DB update
+    fn on_web_update(&self, report: WebReportInfo) -> anyhow::Result<()> {
+        if !report.is_focused {
+            debug!("web update ignored: focused=false");
+            return Ok(());
+        }
+
+        let num_curr_pid = self.opt_app_info.as_ref().map_or(0, |info| info.win_pid);
+        if report.browser_pid == 0 || num_curr_pid != report.browser_pid {
+            debug!("web update pid mismatch: msg={} curr={}, drop", report.browser_pid, num_curr_pid);
+            return Ok(());
+        }
+
+        let str_url = report.opt_url.unwrap_or_default();
+        let str_title = report.opt_title.unwrap_or_default();
+        self.arc_db_handler.apply_web_update(&str_url, &str_title, report.browser_pid, report.at_ms)?;
+
+        debug!("apply_web_update dispatched: event={} url={} title={}", report.str_event, str_url, str_title);
         Ok(())
     }
 
@@ -119,11 +139,6 @@ impl UserTracker {
             debug!("state changed [{}] -> [{}], registered segment", legacy_state, self.state);
         }
         Ok(())
-    }
-
-    fn publish_pid(&self) {
-        let mut guard = self.arc_curr_pid.lock().unwrap_or_else(|p| p.into_inner());
-        *guard = self.opt_app_info.as_ref().map_or(0, |info| info.win_pid);
     }
 
     fn register_database(&self, timestamp: i64) -> anyhow::Result<()> {

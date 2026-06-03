@@ -1,5 +1,5 @@
 use std::fmt;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use chrono::Local;
 use tracing::{Event, Subscriber, info, Level};
 use tracing_subscriber::fmt::{FmtContext, FormatEvent, FormatFields};
@@ -61,17 +61,14 @@ async fn main() -> anyhow::Result<()> {
     let arc_config: Arc<HgConfig> = Arc::new(HgConfig::new(CONFIG_PATH)?);
     info!("deserialized config: {:?}", arc_config);
     
-    // mutex pid for web info update
-    let arc_curr_pid: Arc<Mutex<u32>> = Arc::new(Mutex::new(0));
-
-    // event channel: winevent pump + idle ticker (producers) -> tracker actor (sole consumer)
+    // event channel: winevent pump + idle ticker + web unpacker (producers) -> tracker actor (sole consumer)
     let (tx_event, rx_event) = unbounded_channel::<TrackerEvent>();
 
     // load internal components
     let arc_db_writer = Arc::new(DbHandlerWriter::new(Arc::clone(&arc_config)).expect("Failed to initialize database writer"));
     let arc_db_reader = Arc::new(DbHandlerReader::new(Arc::clone(&arc_config)).expect("Failed to initialize database reader"));
-    let mut tracker = UserTracker::new(Arc::clone(&arc_config), Arc::clone(&arc_db_writer), Arc::clone(&arc_curr_pid), rx_event);
-    let web_listener = WebListener::new(Arc::clone(&arc_config), Arc::clone(&arc_db_writer), Arc::clone(&arc_curr_pid));
+    let mut tracker = UserTracker::new(Arc::clone(&arc_config), Arc::clone(&arc_db_writer), rx_event);
+    let web_listener = WebListener::new(Arc::clone(&arc_config), tx_event.clone());
     let idle_ticker = IdleTicker::new(Arc::clone(&arc_config), tx_event.clone());
 
     // install the foreground hook; kept alive until end of scope so its Drop unhooks + joins the pump thread
