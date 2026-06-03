@@ -9,14 +9,14 @@ use tokio::sync::mpsc::UnboundedSender;
 use windows_sys::Win32::System::SystemInformation::GetTickCount64;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetLastInputInfo, LASTINPUTINFO};
 
-// periodic idle re-evaluation poker; shape mirrors UserTracker / WebListener (new + run)
+// periodic idle re-evaluation poker; shape mirrors UserTracker / WebEvent (new + run)
 #[derive(Debug)]
-pub struct IdleTicker {
+pub struct IdleEvent {
     arc_config: Arc<HgConfig>,
     tx_event: UnboundedSender<TrackerEvent>,
 }
 
-impl IdleTicker {
+impl IdleEvent {
     pub fn new(arc_config: Arc<HgConfig>, tx_event: UnboundedSender<TrackerEvent>) -> Self {
         Self { arc_config, tx_event }
     }

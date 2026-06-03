@@ -2,11 +2,11 @@
  The tracker is the single owner of the usage-segment state machine. It no longer polls the
  foreground window itself; instead it passively consumes a stream of TrackerEvent values produced
  by three independent sources:
-   - surveillant_winevent: a SetWinEventHook message pump that emits ForegroundChanged on every
+   - surveillant_win_event: a SetWinEventHook message pump that emits ForegroundChanged on every
      EVENT_SYSTEM_FOREGROUND, i.e. the moment the OS switches the active window.
-   - surveillant_idle: a timer that emits IdleTick so we can re-evaluate Active/Idle, which has no
-     native Win32 event.
-   - surveillant_web_listener: a pure UDP unpacker that emits WebUpdate(WebReportInfo) per browser
+   - surveillant_idle_event: a timer that emits IdleTick so we can re-evaluate Active/Idle, which has
+     no native Win32 event.
+   - surveillant_web_event: a pure UDP unpacker that emits WebUpdate(WebReportInfo) per browser
      report; this task applies the focused + pid policy and the fill/fork DB write.
  Because every mutation of `state` / `opt_app_info` and every database write happens on this one
  task, the foreground pid is matched against our own state and the previous cross-thread race
@@ -14,7 +14,9 @@
  */
 
 use hg_common::{EventType, HgConfig, AppSnapshotInfo, DbHandlerWriter, TrackerEvent, WebReportInfo};
-use crate::surveillant_idle::IdleTicker;
+use crate::surveillant_idle_event::IdleEvent;
+use crate::surveillant_web_event::WebEvent;
+use crate::surveillant_win_event::WinEvent;
 
 use std::path::Path;
 use std::sync::Arc;
@@ -23,7 +25,7 @@ use std::os::windows::ffi::OsStringExt;
 use anyhow::Context;
 use tracing::{debug, trace};
 use chrono::Utc;
-use tokio::sync::mpsc::UnboundedReceiver;
+use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver};
 
 use windows_sys::Win32::Foundation::{CloseHandle, HWND};
 use windows_sys::Win32::System::Threading::{OpenProcess, QueryFullProcessImageNameW, PROCESS_QUERY_LIMITED_INFORMATION};
@@ -33,9 +35,6 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindow
 pub struct UserTracker {
     arc_config: Arc<HgConfig>,
     arc_db_handler: Arc<DbHandlerWriter>,
-
-    // inbound event stream; this task is the sole consumer
-    rx_event: UnboundedReceiver<TrackerEvent>,
 
     // current segment info
     state: EventType,
@@ -54,15 +53,30 @@ impl Drop for UserTracker {
 }
 
 impl UserTracker {
-    pub fn new(arc_config: Arc<HgConfig>, arc_db_handler: Arc<DbHandlerWriter>, rx_event: UnboundedReceiver<TrackerEvent>, ) -> Self {
-        Self { arc_config, arc_db_handler, rx_event, state: EventType::Online, opt_app_info: None, }
+    pub fn new(arc_config: Arc<HgConfig>, arc_db_handler: Arc<DbHandlerWriter>) -> Self {
+        Self { arc_config, arc_db_handler, state: EventType::Online, opt_app_info: None, }
     }
 
-    // seed one initial segment, then passively dispatch events until the channel closes
     pub async fn run(&mut self) -> anyhow::Result<()> {
+        let (tx_event, mut rx_event) = unbounded_channel::<TrackerEvent>();
+
+        let _win_event = WinEvent::start(tx_event.clone()).expect("Failed to install foreground hook");
+        let idle_event = IdleEvent::new(Arc::clone(&self.arc_config), tx_event.clone());
+        let web_event = WebEvent::new(Arc::clone(&self.arc_config), tx_event.clone());
+        drop(tx_event);  // only the three sources keep a sender now
+
         self.seed_initial()?;
 
-        while let Some(event) = self.rx_event.recv().await {
+        tokio::select! {
+            r = self.dispatch_events(&mut rx_event) => r,
+            r = idle_event.run() => r,
+            r = web_event.run() => r,
+        }
+    }
+
+    // drain the event channel until it closes, dispatching each event to its handler
+    async fn dispatch_events(&mut self, rx_event: &mut UnboundedReceiver<TrackerEvent>) -> anyhow::Result<()> {
+        while let Some(event) = rx_event.recv().await {
             match event {
                 TrackerEvent::ForegroundChanged { hwnd_addr, at_ms } => self.on_foreground(hwnd_addr, at_ms)?,
                 TrackerEvent::IdleTick => self.on_idle_tick()?,
@@ -78,7 +92,7 @@ impl UserTracker {
     fn seed_initial(&mut self) -> anyhow::Result<()> {
         let now_ms = Utc::now().timestamp_millis();
 
-        let last_input_ms = IdleTicker::get_last_input_ms(now_ms).context("Failed to get last input info")?;
+        let last_input_ms = IdleEvent::get_last_input_ms(now_ms).context("Failed to get last input info")?;
         self.state = if now_ms - last_input_ms >= self.arc_config.idle_timeout_ms { EventType::Idle } else { EventType::Active };
 
         self.opt_app_info = Self::current_foreground_snapshot();
@@ -127,7 +141,7 @@ impl UserTracker {
     fn on_idle_tick(&mut self) -> anyhow::Result<()> {
         let now_ms = Utc::now().timestamp_millis();
 
-        let last_input_ms = IdleTicker::get_last_input_ms(now_ms).context("Failed to get last input info")?;
+        let last_input_ms = IdleEvent::get_last_input_ms(now_ms).context("Failed to get last input info")?;
         let legacy_state = self.state;
         self.state = if now_ms - last_input_ms >= self.arc_config.idle_timeout_ms { EventType::Idle } else { EventType::Active };
         trace!("idle for {} ms", now_ms - last_input_ms);

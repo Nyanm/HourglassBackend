@@ -11,7 +11,7 @@ pub enum EventType {
     Offline,
 }
 
-// unpacked browser report forwarded by WebListener to the tracker actor; the actor owns all policy
+// unpacked browser report forwarded by WebEvent to the tracker actor; the actor owns all policy
 #[derive(Debug, Clone)]
 pub struct WebReportInfo {
     pub str_event: String,

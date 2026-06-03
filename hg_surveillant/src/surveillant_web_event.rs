@@ -42,12 +42,12 @@ struct WebReceiverMessage {
 }
 
 #[derive(Debug)]
-pub struct WebListener {
+pub struct WebEvent {
     arc_config: Arc<HgConfig>,
     tx_event: UnboundedSender<TrackerEvent>,  // forwards unpacked reports to the tracker actor
 }
 
-impl WebListener {
+impl WebEvent {
     pub fn new(arc_config: Arc<HgConfig>, tx_event: UnboundedSender<TrackerEvent>) -> Self {
         Self { arc_config, tx_event }
     }

@@ -35,7 +35,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS, WM_QUIT,
 };
 
-// process-global bridge from the C callback to the async tracker; set once by ForegroundHook::start
+// process-global bridge from the C callback to the async tracker; set once by WinEvent::start
 static EVENT_TX: OnceLock<UnboundedSender<TrackerEvent>> = OnceLock::new();
 
 // WinEvent callback: filter to real foreground switches
@@ -59,12 +59,12 @@ unsafe extern "system" fn process_win_event(
 }
 
 #[derive(Debug)]
-pub struct ForegroundHook {
+pub struct WinEvent {
     thread_id: u32,  // pump thread id, used to PostThreadMessage(WM_QUIT) on drop
     opt_join_handle: Option<JoinHandle<()>>,
 }
 
-impl ForegroundHook {
+impl WinEvent {
     // install the foreground hook on a dedicated message-pump thread
     pub fn start(tx_event: UnboundedSender<TrackerEvent>) -> anyhow::Result<Self> {
         EVENT_TX.set(tx_event).map_err(|_| anyhow!("winevent sender already initialised"))?;  // enable global event tx
@@ -106,7 +106,7 @@ impl ForegroundHook {
     }
 }
 
-impl Drop for ForegroundHook {
+impl Drop for WinEvent {
     fn drop(&mut self) {
         unsafe { PostThreadMessageW(self.thread_id, WM_QUIT, 0, 0); }  // post WM_QUIT to unblock the pump
         if let Some(handle) = self.opt_join_handle.take() {
