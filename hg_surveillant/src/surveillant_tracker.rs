@@ -23,7 +23,7 @@ use std::sync::Arc;
 use std::ffi::OsString;
 use std::os::windows::ffi::OsStringExt;
 use anyhow::Context;
-use tracing::{debug, trace};
+use tracing::{debug, error, trace};
 use chrono::Utc;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 use tokio::time::{sleep_until, Duration, Instant};
@@ -73,8 +73,10 @@ impl UserTracker {
 
     pub async fn run(&mut self) -> anyhow::Result<()> {
         let (tx_event, mut rx_event) = unbounded_channel::<TrackerEvent>();
-
-        let _win_event = WinEvent::start(tx_event.clone()).expect("Failed to install foreground hook");
+        let _win_event = WinEvent::start(tx_event.clone()).unwrap_or_else(|e| {
+            error!("foreground hook failed to install: {:#}", e);
+            panic!("foreground hook is required, cannot continue");
+        });
         let idle_event = IdleEvent::new(Arc::clone(&self.arc_config), tx_event.clone());
         let web_event = WebEvent::new(Arc::clone(&self.arc_config), tx_event.clone());
         self.opt_tx_event = Some(tx_event.clone());  // debounce timer posts CommitForeground through this
