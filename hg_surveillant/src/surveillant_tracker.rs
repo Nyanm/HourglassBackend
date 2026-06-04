@@ -25,7 +25,8 @@ use std::os::windows::ffi::OsStringExt;
 use anyhow::Context;
 use tracing::{debug, trace};
 use chrono::Utc;
-use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver};
+use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
+use tokio::time::{sleep_until, Duration, Instant};
 
 use windows_sys::Win32::Foundation::{CloseHandle, HWND};
 use windows_sys::Win32::System::Threading::{OpenProcess, QueryFullProcessImageNameW, PROCESS_QUERY_LIMITED_INFORMATION};
@@ -39,6 +40,11 @@ pub struct UserTracker {
     // current segment info
     state: EventType,
     opt_app_info: Option<AppSnapshotInfo>,
+
+    // foreground debounce: pending switch data + its commit deadline; both overwritten on each new switch
+    opt_pending_fg: Option<(isize, i64)>,  // (hwnd_addr, at_ms) of the not-yet-committed switch
+    opt_pending_timer: Option<Instant>,
+    opt_tx_event: Option<UnboundedSender<TrackerEvent>>,
 }
 
 impl Drop for UserTracker {
@@ -54,7 +60,15 @@ impl Drop for UserTracker {
 
 impl UserTracker {
     pub fn new(arc_config: Arc<HgConfig>, arc_db_handler: Arc<DbHandlerWriter>) -> Self {
-        Self { arc_config, arc_db_handler, state: EventType::Online, opt_app_info: None, }
+        Self {
+            arc_config,
+            arc_db_handler,
+            state: EventType::Online,
+            opt_app_info: None,
+            opt_pending_fg: None,
+            opt_pending_timer: None,
+            opt_tx_event: None,
+        }
     }
 
     pub async fn run(&mut self) -> anyhow::Result<()> {
@@ -63,7 +77,8 @@ impl UserTracker {
         let _win_event = WinEvent::start(tx_event.clone()).expect("Failed to install foreground hook");
         let idle_event = IdleEvent::new(Arc::clone(&self.arc_config), tx_event.clone());
         let web_event = WebEvent::new(Arc::clone(&self.arc_config), tx_event.clone());
-        drop(tx_event);  // only the three sources keep a sender now
+        self.opt_tx_event = Some(tx_event.clone());  // debounce timer posts CommitForeground through this
+        drop(tx_event);
 
         self.seed_initial()?;
 
@@ -81,6 +96,7 @@ impl UserTracker {
                 TrackerEvent::ForegroundChanged { hwnd_addr, at_ms } => self.on_foreground(hwnd_addr, at_ms)?,
                 TrackerEvent::IdleTick => self.on_idle_tick()?,
                 TrackerEvent::WebUpdate(report) => self.on_web_update(report)?,
+                TrackerEvent::CommitForeground => self.commit_foreground()?,
                 TrackerEvent::Shutdown => { debug!("tracker received shutdown"); break; }
             }
         }
@@ -102,16 +118,40 @@ impl UserTracker {
         Ok(())
     }
 
-    // resolve the new foreground window, refresh the published pid, and open a new segment on a real switch
+    // foreground entry: (re)arm the debounce; a spawned timer posts CommitForeground back when it settles
     fn on_foreground(&mut self, hwnd_addr: isize, at_ms: i64) -> anyhow::Result<()> {
-        let hwnd = hwnd_addr as HWND;
-        let opt_foreground = Self::snapshot_from_hwnd(hwnd);
-        let flag_foreground_switch = self.opt_app_info != opt_foreground;
-        self.opt_app_info = opt_foreground;
+        let deadline = Instant::now() + Duration::from_millis(self.arc_config.foreground_debounce_ms as u64);
+        self.opt_pending_fg = Some((hwnd_addr, at_ms));
+        self.opt_pending_timer = Some(deadline);
 
-        if flag_foreground_switch {
-            self.register_database(at_ms)?;
-            debug!("foreground switched, registered segment");
+        if let Some(tx_event) = &self.opt_tx_event {
+            let tx_event = tx_event.clone();
+            tokio::spawn(async move {
+                sleep_until(deadline).await;
+                let _ = tx_event.send(TrackerEvent::CommitForeground);  // actor may be gone on shutdown -> ignore
+            });
+        }
+        Ok(())
+    }
+
+    // debounce elapsed: commit the settled foreground; reject stale timer signals via the stored deadline
+    fn commit_foreground(&mut self) -> anyhow::Result<()> {
+        match (self.opt_pending_fg, self.opt_pending_timer) {
+            (Some((hwnd_addr, at_ms)), Some(deadline)) if Instant::now() >= deadline => {
+                self.opt_pending_fg = None;
+                self.opt_pending_timer = None;
+
+                let hwnd = hwnd_addr as HWND;
+                let opt_foreground = Self::snapshot_from_hwnd(hwnd);
+                let flag_foreground_switch = self.opt_app_info != opt_foreground;
+                self.opt_app_info = opt_foreground;
+
+                if flag_foreground_switch {
+                    self.register_database(at_ms)?;
+                    debug!("foreground switched, registered segment");
+                }
+            }
+            _ => trace!("commit_foreground: stale or empty signal, skip"),
         }
         Ok(())
     }

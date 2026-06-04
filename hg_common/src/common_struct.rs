@@ -28,6 +28,7 @@ pub enum TrackerEvent {
     ForegroundChanged { hwnd_addr: isize, at_ms: i64 },  // hwnd carried as isize because HWND is not Send
     IdleTick,
     WebUpdate(WebReportInfo),
+    CommitForeground,  // self-posted by the debounce timer when a pending foreground switch settles
     Shutdown,
 }
 
@@ -67,6 +68,7 @@ pub struct HgConfig {
     pub db_path: String,
     pub idle_check_interval_ms: i64,
     pub idle_timeout_ms: i64,
+    pub foreground_debounce_ms: i64,  // settle window before a foreground switch is committed; 0 disables debounce
     pub web_receiver_udp_addr: String,
 }
 impl HgConfig {

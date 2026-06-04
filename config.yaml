@@ -4,6 +4,7 @@ db_path: "./grain.sqlite"
 # user tracker info
 idle_check_interval_ms: 1000
 idle_timeout_ms: 180000
+foreground_debounce_ms: 400  # ignore foreground switches that don't outlast this window (alt-tab transit); 0 disables
 
 # external module info
 web_receiver_udp_addr: "127.0.0.1:51789"  # web sensor receiver -> backend ipc
