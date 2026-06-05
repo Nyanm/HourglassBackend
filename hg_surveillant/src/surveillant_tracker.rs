@@ -7,13 +7,14 @@
    - surveillant_idle_event: a timer that emits IdleTick so we can re-evaluate Active/Idle, which has
      no native Win32 event.
    - surveillant_web_event: a pure UDP unpacker that emits WebUpdate(WebReportInfo) per browser
-     report; this task applies the focused + pid policy and the fill/fork DB write.
+     report; this task applies the focused + pid policy, merges the url into opt_app_info, then runs
+     the SAME register_database path as a foreground switch (no separate fork-from-DB write).
  Because every mutation of `state` / `opt_app_info` and every database write happens on this one
  task, the foreground pid is matched against our own state and the previous cross-thread race
  (and the shared arc_curr_pid mutex) is removed by construction.
  */
 
-use hg_common::{EventType, HgConfig, AppSnapshotInfo, DbHandlerWriter, TrackerEvent, WebReportInfo};
+use hg_common::{EventType, HgConfig, AppSnapshotInfo, DbHandlerWriter, TrackerEvent, WebReportInfo, WebSnapshotInfo};
 use crate::surveillant_idle_event::IdleEvent;
 use crate::surveillant_web_event::WebEvent;
 use crate::surveillant_win_event::WinEvent;
@@ -52,7 +53,7 @@ impl Drop for UserTracker {
         // close last segment and start a new offline segment
         let now_ms = Utc::now().timestamp_millis();
         self.state = EventType::Offline;
-        self.register_database(now_ms).expect("fail to register drop segment");
+        self.register_database(now_ms, false).expect("fail to register drop segment");
 
         debug!("see you next time");
     }
@@ -113,9 +114,9 @@ impl UserTracker {
         let last_input_ms = IdleEvent::get_last_input_ms(now_ms).context("Failed to get last input info")?;
         self.state = if now_ms - last_input_ms >= self.arc_config.idle_timeout_ms { EventType::Idle } else { EventType::Active };
 
-        self.opt_app_info = Self::current_foreground_snapshot();
+        self.opt_app_info = unsafe { Self::snapshot_from_hwnd(GetForegroundWindow()) };
 
-        self.register_database(now_ms)?;
+        self.register_database(now_ms, false)?;
         debug!("seeded initial segment with state [{}]", self.state);
         Ok(())
     }
@@ -145,11 +146,20 @@ impl UserTracker {
 
                 let hwnd = hwnd_addr as HWND;
                 let opt_foreground = Self::snapshot_from_hwnd(hwnd);
+
+                // jitter protection for quick tab changes
+                let num_curr_pid = self.opt_app_info.as_ref().map_or(0, |info| info.win_pid);
+                let num_new_pid = opt_foreground.as_ref().map_or(0, |info| info.win_pid);
+                if num_new_pid != 0 && num_new_pid == num_curr_pid {
+                    trace!("foreground settled on same pid [{}], skip switch", num_new_pid);
+                    return Ok(());
+                }
+
                 let flag_foreground_switch = self.opt_app_info != opt_foreground;
                 self.opt_app_info = opt_foreground;
 
                 if flag_foreground_switch {
-                    self.register_database(at_ms)?;
+                    self.register_database(at_ms, false)?;
                     debug!("foreground switched, registered segment");
                 }
             }
@@ -158,8 +168,8 @@ impl UserTracker {
         Ok(())
     }
 
-    // apply one unpacked browser report: focused + pid gate against our own foreground, then DB update
-    fn on_web_update(&self, report: WebReportInfo) -> anyhow::Result<()> {
+    // apply one unpacked browser report: focused + pid gate, dedup the url, merge into opt_app_info, unified write
+    fn on_web_update(&mut self, report: WebReportInfo) -> anyhow::Result<()> {
         if !report.is_focused {
             debug!("web update ignored: focused=false");
             return Ok(());
@@ -172,10 +182,19 @@ impl UserTracker {
         }
 
         let str_url = report.opt_url.unwrap_or_default();
+        if str_url.is_empty() {
+            debug!("web update ignored: empty url");
+            return Ok(());
+        }
         let str_title = report.opt_title.unwrap_or_default();
-        self.arc_db_handler.apply_web_update(&str_url, &str_title, report.browser_pid, report.at_ms)?;
 
-        debug!("apply_web_update dispatched: event={} url={} title={}", report.str_event, str_url, str_title);
+        // merge the new web info into our in-memory segment, then run the unified DB path
+        if let Some(info) = self.opt_app_info.as_mut() {
+            info.opt_web_info = Some(WebSnapshotInfo { tab_title: str_title.clone(), url: str_url.clone() });
+        }
+        self.register_database(report.at_ms, true)?;
+
+        debug!("web update applied: event={} url={} title={}", report.str_event, str_url, str_title);
         Ok(())
     }
 
@@ -191,22 +210,24 @@ impl UserTracker {
         if legacy_state != self.state {
             // backdate the Active->Idle boundary to the last real input, otherwise stamp now
             let timestamp = if legacy_state == EventType::Active && self.state == EventType::Idle { last_input_ms } else { now_ms };
-            self.register_database(timestamp)?;
+            self.register_database(timestamp, false)?;
             debug!("state changed [{}] -> [{}], registered segment", legacy_state, self.state);
         }
         Ok(())
     }
 
-    fn register_database(&self, timestamp: i64) -> anyhow::Result<()> {
+    // unified DB entry for every segment mutation; is_web_update selects the browser fill-first path
+    fn register_database(&self, timestamp: i64, is_web_update: bool) -> anyhow::Result<()> {
+        if is_web_update && self.arc_db_handler.fill_last_segment_web(&self.opt_app_info)? {
+            debug!("web update filled current segment in place, no new segment");
+            return Ok(());
+        }
+
         self.arc_db_handler.update_segment(timestamp)?;
         self.arc_db_handler.register_segment(self.state, timestamp, &self.opt_app_info)?;
 
-        debug!("register segment with state [{}]", self.state);
+        debug!("register segment with state [{}] (is_web_update={})", self.state, is_web_update);
         Ok(())
-    }
-
-    fn current_foreground_snapshot() -> Option<AppSnapshotInfo> {
-        unsafe { Self::snapshot_from_hwnd(GetForegroundWindow()) }
     }
 
     // resolve a given HWND into a snapshot

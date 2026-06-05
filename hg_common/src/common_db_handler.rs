@@ -17,26 +17,11 @@ const SQL_INSERT_USAGE_SEGMENT: &str =
 const SQL_UPDATE_USAGE_SEGMENT: &str =
     "UPDATE usage_segments SET end_ms = ? WHERE rowid = (SELECT MAX(rowid) FROM usage_segments);";
 // fill url/tab_title onto the latest row ONLY if it's our browser pid and has no url yet
-const SQL_FILL_LATEST_URL: &str =
+const SQL_UPDATE_FILL_LATEST_URL: &str =
     "UPDATE usage_segments SET url = ?1, tab_title = ?2
         WHERE rowid = (SELECT MAX(rowid) FROM usage_segments)
           AND pid = ?3
           AND (url IS NULL OR url = '')";
-// stamp end_ms on the latest row ONLY when it's our browser pid and already has a different non-empty url
-const SQL_CLOSE_LATEST_BEFORE_FORK: &str =
-    "UPDATE usage_segments SET end_ms = ?1
-        WHERE rowid = (SELECT MAX(rowid) FROM usage_segments)
-          AND pid = ?2
-          AND url IS NOT NULL AND url != '' AND url != ?3";
-// open a new segment carrying the latest row's app identity but with the new url; same precondition as close
-const SQL_FORK_LATEST_TO_NEW_URL: &str =
-    "INSERT INTO usage_segments
-        (start_ms, end_ms, seg_state, pid, process_name, exe_path, window_title, tab_title, url)
-        SELECT ?1, NULL, seg_state, pid, process_name, exe_path, window_title, ?2, ?3
-            FROM usage_segments
-            WHERE rowid = (SELECT MAX(rowid) FROM usage_segments)
-              AND pid = ?4
-              AND url IS NOT NULL AND url != '' AND url != ?3";
 
 /*
     reader query sql
@@ -90,30 +75,21 @@ impl DbHandlerWriter {
         Ok(())
     }
 
-    // applies an incoming url to the latest browser segment: fill if empty, dedup if same, fork if different
-    pub fn apply_web_update(&self, str_url: &str, str_tab_title: &str, num_browser_pid: u32, now_ms: i64, ) -> anyhow::Result<()> {
-        if str_url.is_empty() {
-            debug!("apply_web_update: incoming url is empty, skip");
-            return Ok(());
-        }
+    // fill url/tab_title from opt_info onto the latest row IF it is the same pid and still has no url;
+    // returns true only when a row was actually filled (the browser's first url right after we switched to it)
+    pub fn fill_last_segment_web(&self, opt_info: &Option<AppSnapshotInfo>) -> anyhow::Result<bool> {
+        let opt_pid_web = opt_info.as_ref()
+            .and_then(|info| info.opt_web_info.as_ref().map(|web| (info.win_pid, web)));
+        let (num_pid, web) = match opt_pid_web {
+            Some(pair) => pair,
+            None => return Ok(false),  // no app or no web info to fill
+        };
 
-        let mut conn = self.mutex_conn.lock().unwrap_or_else(|p| p.into_inner());
-        let tx = conn.transaction()?;
+        let conn = self.mutex_conn.lock().unwrap_or_else(|p| p.into_inner());
+        let cnt_fill = conn.execute(SQL_UPDATE_FILL_LATEST_URL, params![web.url.as_str(), web.tab_title.as_str(), num_pid])?;
 
-        // three mutually exclusive WHERE clauses; at most one of (fill) or (close+fork) actually mutates rows
-        let cnt_fill = tx.execute(SQL_FILL_LATEST_URL,          params![str_url, str_tab_title, num_browser_pid])?;
-        tx.execute(SQL_CLOSE_LATEST_BEFORE_FORK,                params![now_ms, num_browser_pid, str_url])?;
-        let cnt_fork = tx.execute(SQL_FORK_LATEST_TO_NEW_URL,   params![now_ms, str_tab_title, str_url, num_browser_pid])?;
-
-        tx.commit()?;
-
-        match (cnt_fill, cnt_fork) {
-            (1, 0) => debug!("apply_web_update: filled latest segment with url '{}'", str_url),
-            (0, 1) => debug!("apply_web_update: forked latest segment to url '{}'", str_url),
-            (0, 0) => debug!("apply_web_update: no-op (url unchanged / pid mismatch / no rows)"),
-            _      => debug!("apply_web_update: unexpected fill={} fork={}", cnt_fill, cnt_fork),
-        }
-        Ok(())
+        debug!("fill_last_segment_web affected {} row(s) for pid {}", cnt_fill, num_pid);
+        Ok(cnt_fill == 1)
     }
 }
 
